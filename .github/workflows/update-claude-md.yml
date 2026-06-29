@@ -71,8 +71,8 @@ jobs:
 
       - name: Check no unclosed claude-mem-context tags
         run: |
-          OPEN=$(grep -c '<claude-mem-context>' CLAUDE.md 2>/dev/null || echo 0)
-          CLOSE=$(grep -c '</claude-mem-context>' CLAUDE.md 2>/dev/null || echo 0)
+          OPEN=$(grep -cE '^<claude-mem-context>' CLAUDE.md 2>/dev/null || echo 0)
+          CLOSE=$(grep -cE '^</claude-mem-context>' CLAUDE.md 2>/dev/null || echo 0)
           if [ "$OPEN" != "$CLOSE" ]; then
             echo "ERROR: Mismatched <claude-mem-context> tags (open=$OPEN, close=$CLOSE)"
             exit 1
