@@ -1,0 +1,80 @@
+name: CLAUDE.md Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'CLAUDE.md'
+      - 'package.json'
+      - 'src/**'
+      - 'scripts/regenerate-claude-md.ts'
+      - '.github/workflows/update-claude-md.yml'
+  pull_request:
+    paths:
+      - 'CLAUDE.md'
+      - 'package.json'
+      - 'src/**'
+      - 'scripts/regenerate-claude-md.ts'
+      - '.github/workflows/update-claude-md.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-claude-md:
+    name: Validate CLAUDE.md static sections
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check CLAUDE.md exists and is non-empty
+        run: |
+          if [ ! -f CLAUDE.md ]; then
+            echo "ERROR: CLAUDE.md is missing"
+            exit 1
+          fi
+          SIZE=$(wc -c < CLAUDE.md)
+          echo "CLAUDE.md: ${SIZE} bytes"
+          if [ "$SIZE" -lt 2000 ]; then
+            echo "ERROR: CLAUDE.md is too small (${SIZE} bytes, expected > 2KB)"
+            exit 1
+          fi
+
+      - name: Check required sections are present
+        run: |
+          MISSING=0
+          for SECTION in \
+            "## Build" \
+            "## Testing" \
+            "## Project Structure" \
+            "## Architecture" \
+            "## File Locations" \
+            "## Requirements" \
+            "## Important Rules"; do
+            if ! grep -qF "$SECTION" CLAUDE.md; then
+              echo "ERROR: Missing section: $SECTION"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -eq 1 ]; then exit 1; fi
+          echo "All required sections present."
+
+      - name: Check version consistency with package.json
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if ! grep -qF "$PKG_VERSION" CLAUDE.md; then
+            echo "ERROR: Version $PKG_VERSION from package.json not found in CLAUDE.md"
+            echo "Update the <!-- AUTO:version --> block in CLAUDE.md to match package.json"
+            exit 1
+          fi
+          echo "Version $PKG_VERSION is documented in CLAUDE.md."
+
+      - name: Check no unclosed claude-mem-context tags
+        run: |
+          OPEN=$(grep -c '<claude-mem-context>' CLAUDE.md 2>/dev/null || echo 0)
+          CLOSE=$(grep -c '</claude-mem-context>' CLAUDE.md 2>/dev/null || echo 0)
+          if [ "$OPEN" != "$CLOSE" ]; then
+            echo "ERROR: Mismatched <claude-mem-context> tags (open=$OPEN, close=$CLOSE)"
+            exit 1
+          fi
+          echo "claude-mem-context tag balance OK (${OPEN} pairs)."

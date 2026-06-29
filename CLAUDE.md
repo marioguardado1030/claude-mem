@@ -1,36 +1,232 @@
 # Claude-Mem: AI Development Instructions
 
-Claude-mem is a Claude Code plugin providing persistent memory across sessions. It captures tool usage, compresses observations using the Claude Agent SDK, and injects relevant context into future sessions.
+claude-mem is a Claude Code plugin providing persistent memory across sessions.
+It captures tool usage, compresses observations using the Claude Agent SDK
+(`@anthropic-ai/claude-agent-sdk`), and injects relevant context into future
+sessions via `<claude-mem-context>` tagged blocks in CLAUDE.md files.
+
+<!-- AUTO:version -->
+**Version:** 13.8.1
+<!-- /AUTO:version -->
+
+**Runtime:** Bun + Node.js | **License:** Apache-2.0
+
+---
 
 ## Build
 
 ```bash
-npm run build-and-sync        # Build, sync to marketplace, restart worker
+npm run build            # sync-plugin-manifests + build-hooks + gen-plugin-lockfile
+npm run build-and-sync   # build + sync to ~/.claude/plugins/marketplaces/thedotmack/ + restart worker
+npm run build:binaries   # compile worker binary (bun compile --minify)
 ```
 
-## File Locations
+Build steps in order:
+1. `scripts/sync-plugin-manifests.js` — sync manifests between root and plugin/
+2. `scripts/build-hooks.js` — compile TypeScript hooks to CJS, enforce bundle-size guardrails
+3. `scripts/gen-plugin-lockfile.cjs` — generate `plugin/bun.lock`
+4. `scripts/sync-marketplace.cjs` — copy built plugin to `~/.claude/plugins/marketplaces/thedotmack/`
+5. Worker restart via `npm run worker:restart` in the installed plugin directory
 
-- **Source**: `<project-root>/src/`
-- **Built Plugin**: `<project-root>/plugin/`
-- **Installed Plugin**: `~/.claude/plugins/marketplaces/thedotmack/`
-- **Database**: `~/.claude-mem/claude-mem.db`
-- **Chroma**: `~/.claude-mem/chroma/`
+---
+
+## Testing
+
+```bash
+bun test                           # all tests
+bun test tests/sqlite/             # SQLite storage layer tests
+bun test tests/worker/agents/      # agent compression tests
+bun test tests/worker/search/      # search index tests
+bun test tests/context/            # context injection tests
+bun test tests/infra/              # infrastructure tests
+bun test tests/server/             # server-runtime smoke tests (boots HTTP in-process)
+npm run typecheck                  # tsc --noEmit (root tsconfig + viewer tsconfig)
+npm run typecheck:root             # root only
+npm run typecheck:viewer           # src/ui/viewer tsconfig only
+npm run lint:hook-io               # check hook stdin/stdout discipline
+npm run lint:spawn-env             # check spawn env discipline
+npm run smoke:clean-room           # dependency closure smoke test
+npm run e2e:server-beta:docker     # full E2E (Postgres + Valkey via Docker Compose)
+```
+
+---
+
+## Worker Service
+
+```bash
+npm run worker:start    # start the background worker (port 37777)
+npm run worker:stop     # stop the worker
+npm run worker:restart  # restart the worker
+npm run worker:status   # print worker status
+npm run worker:logs     # tail today's log (~/.claude-mem/logs/worker-YYYY-MM-DD.log)
+```
+
+---
+
+## Memory Operations
+
+```bash
+npm run queue                # inspect pending compression queue
+npm run queue:process        # manually process pending queue items
+npm run queue:clear:pending  # clear all pending items (destructive)
+```
+
+---
+
+## CLAUDE.md Regeneration (local dev only)
+
+```bash
+npm run claude-md:regenerate  # inject <claude-mem-context> blocks from live DB
+npm run claude-md:dry-run     # preview regeneration without writing
+```
+
+**Important:** `regenerate-claude-md.ts` requires a live `~/.claude-mem/claude-mem.db`.
+It reads recent session observations and injects them as `<claude-mem-context>` blocks
+into CLAUDE.md files throughout the project. This script cannot run in CI.
+
+---
+
+## Project Structure
+
+```
+src/
+  build/        → Bun build pipeline configuration
+  cli/          → CLI entry points
+  core/         → Core memory compression and observation engine
+  hooks/        → Claude Code lifecycle hooks (5 hooks; compiled to plugin/hooks/)
+  integrations/ → Third-party IDE integrations (Cursor, Windsurf)
+  npx-cli/      → npx entry point (bin: claude-mem → dist/npx-cli/index.js)
+  sdk/          → Public SDK exports (package.json exports: "./sdk")
+  server/       → Express.js HTTP server + auth (BetterAuth + API keys)
+  servers/      → MCP server definitions (3 search tools)
+  services/     → Worker service (BullMQ job processing, Redis/Valkey queue)
+  shared/       → Shared utilities (SettingsDefaultsManager, timeline-formatting,
+                  path-utils, claude-md-utils, replaceTaggedContent)
+  storage/      → Storage backends: SQLite (primary), Chroma (vector), Redis (queue)
+  supervisor/   → Process supervisor for the worker service daemon
+  types/        → TypeScript type definitions
+  ui/           → React 19 web viewer (separate tsconfig, served at :37777)
+  utils/        → Miscellaneous utilities
+
+plugin/         → Built plugin output
+  hooks/        → Compiled hook CJS scripts (generated by build-hooks.js)
+  modes/        → Plugin mode configurations
+  scripts/      → Worker service binary + CJS runner scripts
+  skills/       → Skill definitions (mem-search)
+
+scripts/        → Dev/ops scripts (not shipped in npm package)
+  regenerate-claude-md.ts     → Local-only CLAUDE.md memory injector
+  build-hooks.js              → Main build script (enforces bundle-size guardrails)
+  gen-plugin-lockfile.cjs     → Generates plugin/bun.lock
+  sync-marketplace.cjs        → Syncs plugin to local marketplace install
+  check-hook-io-discipline.cjs  → Lint: hooks must not write to stdout
+  check-spawn-env-discipline.cjs → Lint: spawned processes must get clean env
+  smoke-clean-room.cjs          → Dependency closure smoke test
+  update-claude-md.cjs          → CI version sync (updates AUTO:version block)
+
+tests/
+  sqlite/       → SQLite storage layer tests
+  worker/       → Worker agent + search tests
+  context/      → Context injection tests
+  server/       → Server-runtime smoke tests
+
+docs/
+  public/       → Mintlify MDX source (auto-deploys to docs.claude-mem.ai on push to main)
+  i18n/         → Auto-translated README variants
+```
+
+---
+
+## Architecture
+
+### Data Flow
+
+```
+Claude Code session
+  → Hook fires (SessionStart / PostToolUse / Stop)
+  → Hook CJS script (plugin/hooks/*.cjs) POSTs observation to worker HTTP API
+  → Worker (port 37777, Express.js) enqueues into BullMQ (Redis/Valkey)
+  → Compression agent (Claude Agent SDK) compresses and summarises observation
+  → Stores result in SQLite (~/.claude-mem/claude-mem.db) + Chroma (vector)
+  → Next SessionStart: MCP server queries SQLite + Chroma for relevant context
+  → Injects <claude-mem-context>...</claude-mem-context> block into project CLAUDE.md
+```
+
+### Storage Backends
+
+| Backend | Purpose | Default path |
+|---------|---------|-------------|
+| SQLite | Primary observation store, FTS5 search | `~/.claude-mem/claude-mem.db` |
+| Chroma | Vector similarity search | `~/.claude-mem/chroma/` |
+| Redis/Valkey | BullMQ job queue, session cache | `localhost:6379` |
+
+### MCP Server Tools
+
+Three tools exposed via `src/servers/` and registered with Claude Code:
+
+| Tool | Token cost | Purpose |
+|------|-----------|--------|
+| `search` | ~50–100 tokens | Compact observation index with IDs |
+| `timeline` | ~100–300 tokens | Chronological context around search results |
+| `get_observations` | ~500–1000 tokens | Full observation details fetched by ID |
+
+Progressive disclosure pattern: call `search` first, then `get_observations` only for
+the IDs you actually need.
+
+### Hook System (5 lifecycle events)
+
+| Hook | Event trigger | Purpose |
+|------|-------------|--------|
+| `SessionStart` | Claude Code starts a session | Inject recent memory context into project CLAUDE.md |
+| `UserPromptSubmit` | User submits a prompt | Capture prompt metadata |
+| `PostToolUse` | Any tool call completes | Record file modifications and tool results |
+| `Stop` | Agent stops responding | Finalise in-progress session observations |
+| `SessionEnd` | Session terminates | Compress all session observations and store to SQLite |
+
+Hook source: `src/hooks/`. Compiled output: `plugin/hooks/*.cjs`.
+
+---
+
+## File Locations (Runtime)
+
+| File | Path |
+|------|------|
+| Database | `~/.claude-mem/claude-mem.db` |
+| Chroma data | `~/.claude-mem/chroma/` |
+| Settings | `~/.claude-mem/settings.json` |
+| Worker logs | `~/.claude-mem/logs/worker-YYYY-MM-DD.log` |
+| Installed plugin | `~/.claude/plugins/marketplaces/thedotmack/` |
+
+---
 
 ## Requirements
 
-- **Bun** (all platforms - auto-installed if missing)
-- **uv** (all platforms - auto-installed if missing, provides Python for Chroma)
-- Node.js
+- **Bun** ≥ 1.0.0 (auto-installed if missing)
+- **Node.js** ≥ 20.12.0
+- **uv** (auto-installed if missing; provides Python runtime for Chroma)
+- Redis or Valkey (for BullMQ queue; SQLite-only mode works without it)
+
+---
 
 ## Documentation
 
-**Public Docs**: https://docs.claude-mem.ai (Mintlify)
-**Source**: `docs/public/` - MDX files, edit `docs.json` for navigation
-**Deploy**: Auto-deploys from GitHub on push to main
+**Public Docs:** https://docs.claude-mem.ai (Mintlify)
+**Source:** `docs/public/` — MDX files, edit `docs.json` for navigation
+**Auto-deploys** from push to `main`.
 
-## Important
+---
 
-No need to edit the changelog ever, it's generated automatically.
+## Important Rules
+
+- Never edit `CHANGELOG.md` manually — it is auto-generated by `npm run changelog:generate`.
+- `package-lock.json` is intentionally gitignored; always use `npm install`, not `npm ci`.
+- `<claude-mem-context>` blocks in CLAUDE.md files are managed by the worker — do not edit them manually.
+- Do not commit compiled `plugin/scripts/claude-mem` binary — it is gitignored.
+- The bundle-size guardrail in `scripts/build-hooks.js` is enforced in CI — do not bypass it.
+- Hook scripts must not write to stdout (checked by `npm run lint:hook-io`); use stderr for debug output.
+- Spawned child processes must receive a clean, explicit env (checked by `npm run lint:spawn-env`).
+
+---
 
 ## Daily Maintenance
 
@@ -40,4 +236,20 @@ Run a daily version check across all package manifests and upgrade every depende
 - Upgrade every package to `latest` (use `npm install <pkg>@latest` for each, or `npx npm-check-updates -u && npm install`). Bump majors too.
 - Run `npm audit fix` to resolve advisories.
 - After upgrades, run `npm run build-and-sync` and verify the worker starts and tests pass. Fix any breakage caused by major bumps in the same change.
-- Commit the updated `package.json` and `package-lock.json` files.
+- Commit the updated `package.json` and any updated lockfiles.
+
+---
+
+## CLAUDE.md Maintenance
+
+The static sections of this file (everything except `<claude-mem-context>` tagged blocks)
+are validated on every push via `.github/workflows/update-claude-md.yml`, which:
+- Checks all required sections are present
+- Verifies the version in this file matches `package.json`
+- Validates `<claude-mem-context>` tag balance (no unclosed tags)
+
+When bumping the version in `package.json`, also update the `<!-- AUTO:version -->` block above.
+The CI check will fail if they are out of sync.
+
+The `<claude-mem-context>` sections are injected locally by `npm run claude-md:regenerate`
+and are NOT managed by GitHub Actions (they require a live local database).
